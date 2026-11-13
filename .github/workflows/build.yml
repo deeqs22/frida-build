@@ -91,6 +91,8 @@ jobs:
                   LOGI("Ultimate Bypass Initialized");
               }
           }
+          // ВОТ ЭТА СТРОКА ИСПРАВЛЯЕТ ОШИБКУ:
+          extern "C" void bypass_init() { bypass::init(); }
           EOF
           
           cat > src/main_imgui.cpp << 'EOF'
@@ -104,7 +106,7 @@ jobs:
           #include "imgui_impl_opengl3.h"
           #include "dobby.h"
           
-          extern void bypass_init();
+          extern "C" void bypass_init();
           static bool g_menu_open = true;
           
           void init_imgui() {
@@ -128,7 +130,7 @@ jobs:
           
           void* delayed_init(void* arg) {
               sleep(8);
-              bypass::init();
+              bypass_init(); // ИСПРАВЛЕНО ТУТ
               init_imgui();
               void* libegl = dlopen("libEGL.so", RTLD_NOW);
               if (libegl) {
