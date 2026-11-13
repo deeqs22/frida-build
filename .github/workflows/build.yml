@@ -9,7 +9,7 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26d
-      - name: Create Zygisk Header
+      - name: Create Zygisk Header & Source
         run: |
           mkdir -p zygisk
           cat > zygisk/zygisk.hpp << 'EOF'
@@ -45,7 +45,6 @@ jobs:
               };
 
               void registerModule(ModuleBase *module);
-              void unregisterModule();
           }
 
           #define REGISTER_ZYGISK_MODULE(clazz) \
@@ -53,6 +52,14 @@ jobs:
               static clazz module; \
               module.onLoad(api, env); \
               zygisk::registerModule(&module); \
+          }
+          EOF
+          
+          cat > zygisk/zygisk.cpp << 'EOF'
+          #include "zygisk.hpp"
+          namespace zygisk {
+              static ModuleBase* g_module = nullptr;
+              void registerModule(ModuleBase *module) { g_module = module; }
           }
           EOF
       - name: Create Injector Code
@@ -110,7 +117,7 @@ jobs:
           LOCAL_PATH := $(call my-dir)
           include $(CLEAR_VARS)
           LOCAL_MODULE := arm64-v8a
-          LOCAL_SRC_FILES := module.cpp
+          LOCAL_SRC_FILES := module.cpp zygisk/zygisk.cpp
           LOCAL_CPPFLAGS := -std=c++17 -O2 -fvisibility=hidden -I$(LOCAL_PATH)/zygisk
           LOCAL_LDLIBS := -llog -ldl
           LOCAL_LDFLAGS := -Wl,-z,max-page-size=0x4000
