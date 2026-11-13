@@ -1,26 +1,23 @@
-name: Build Frida Dump
+name: Build Frida Python Dump
 on: [push, workflow_dispatch]
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup NDK
-        uses: nttld/setup-ndk@v1
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          ndk-version: r26d
-      - name: Download Frida Core
+          python-version: '3.10'
+      - name: Install Frida
+        run: pip install frida-tools
+      - name: Create Python Script
         run: |
-          wget https://github.com/frida/frida/releases/download/16.2.1/frida-core-devkit-16.2.1-android-arm64.tar.xz
-          tar -xf frida-core-devkit-16.2.1-android-arm64.tar.xz
-      - name: Create Code
-        run: |
-          cat > dump.cpp << 'EOF'
-          #include <frida-core.h>
-          #include <stdio.h>
-          #include <unistd.h>
+          cat > dump.py << 'EOF'
+          import frida
+          import time
 
-          const char* js_code = R"(
+          js_code = """
           setImmediate(function() {
               console.log("[*] JS loaded. Finding libil2cpp.so...");
               var il2cpp = Process.findModuleByName("libil2cpp.so");
@@ -28,59 +25,30 @@ jobs:
               var domain_get = Module.findExportByName("libil2cpp.so", "il2cpp_domain_get");
               if (domain_get) {
                   console.log("[+] il2cpp_domain_get found at " + domain_get);
-              } else {
-                  console.log("[-] il2cpp_domain_get not exported.");
               }
           });
-          )";
+          """
 
-          static void on_message(FridaScript *script, const gchar *message, GBytes *data, gpointer user_data) {
-              printf("[JS]: %s\n", message);
-          }
+          def on_message(message, data):
+              print("[JS]:", message)
 
-          int main(int argc, char* argv[]) {
-              frida_init();
-              FridaDeviceManager* mgr = frida_device_manager_new();
-              GError* error = NULL;
-              FridaDeviceList* devices = frida_device_manager_enumerate_devices_sync(mgr, NULL, &error);
-              FridaDevice* device = frida_device_list_get(devices, 0);
-              printf("[*] Attached to device: %s\n", frida_device_get_name(device));
-
-              FridaProcessList* procs = frida_device_enumerate_processes_sync(device, NULL, &error);
-              FridaProcess* target = NULL;
-              for (int i = 0; i < frida_process_list_size(procs); i++) {
-                  FridaProcess* p = frida_process_list_get(procs, i);
-                  if (g_strcmp0(frida_process_get_name(p), "com.netease.newspike") == 0) {
-                      target = p; break;
-                  }
-              }
-
-              if (!target) {
-                  printf("[-] Game process not found. Is the game running?\n");
-                  return 1;
-              }
-
-              printf("[*] Attaching to %s (PID: %d)...\n", frida_process_get_name(target), frida_process_get_pid(target));
-              FridaSession* session = frida_device_attach_sync(device, frida_process_get_pid(target), NULL, &error);
-              if (error) { printf("[-] Attach error: %s\n", error->message); return 1; }
-
-              printf("[*] Creating script...\n");
-              FridaScript* script = frida_session_create_script_sync(session, js_code, NULL, &error);
-              frida_script_on(script, "message", G_CALLBACK(on_message), NULL);
-              frida_script_load_sync(script, NULL, &error);
-
-              printf("[*] Script loaded. Sleeping 10 sec to let JS run...\n");
-              sleep(10);
-
-              frida_unref(script); frida_unref(session); frida_unref(device); frida_unref(mgr);
-              return 0;
-          }
+          print("[*] Waiting for device...")
+          device = frida.get_usb_device()
+          print("[*] Attached to device:", device.name)
+          try:
+              print("[*] Spawning com.netease.newspike...")
+              pid = device.spawn(["com.netease.newspike"])
+              session = device.attach(pid)
+              script = session.create_script(js_code)
+              script.on('message', on_message)
+              script.load()
+              device.resume(pid)
+              time.sleep(10)
+          except Exception as e:
+              print("[-] Error:", e)
           EOF
-      - name: Compile
-        run: |
-          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++ -o frida_dump dump.cpp -I. -L. -lfrida-core -llog -ldl -pthread
-      - name: Upload Artifact
+      - name: Upload Script
         uses: actions/upload-artifact@v4
         with:
-          name: frida_dump
-          path: frida_dump
+          name: dump_script
+          path: dump.py
