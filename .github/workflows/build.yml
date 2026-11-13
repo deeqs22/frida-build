@@ -12,7 +12,7 @@ jobs:
       - name: Download Zygisk Header
         run: |
           mkdir -p zygisk
-          wget https://raw.githubusercontent.com/LSPosed/zygisk-module-sample/master/module/jni/zygisk.hpp -O zygisk/zygisk.hpp
+          wget https://raw.githubusercontent.com/Dr-TSNG/ZygiskNext/master/module/src/include/zygisk.hpp -O zygisk/zygisk.hpp
       - name: Create Injector Code
         run: |
           cat > module.cpp << 'EOF'
@@ -44,7 +44,6 @@ jobs:
           private:
               static void* inject_thread(void* arg) {
                   auto* self = static_cast<Injector*>(arg);
-                  // Ждем загрузки Unity
                   sleep(3); 
                   void* h = dlopen(kSo, RTLD_NOW);
                   if (h) {
@@ -71,7 +70,7 @@ jobs:
           include $(CLEAR_VARS)
           LOCAL_MODULE := arm64-v8a
           LOCAL_SRC_FILES := module.cpp
-          LOCAL_CPPFLAGS := -std=c++17 -O2 -fvisibility=hidden
+          LOCAL_CPPFLAGS := -std=c++17 -O2 -fvisibility=hidden -I$(LOCAL_PATH)/zygisk
           LOCAL_LDLIBS := -llog -ldl
           LOCAL_LDFLAGS := -Wl,-z,max-page-size=0x4000
           include $(BUILD_SHARED_LIBRARY)
