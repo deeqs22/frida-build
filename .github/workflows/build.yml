@@ -4,7 +4,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Setup NDK
         uses: nttld/setup-ndk@v1
         with:
@@ -25,7 +25,8 @@ jobs:
         run: |
           $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++ -o frida_dump dump.cpp -I. -L. -lfrida-core -llog -ldl -pthread
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: frida_dump
           path: frida_dump
+  
