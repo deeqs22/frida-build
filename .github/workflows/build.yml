@@ -1,54 +1,102 @@
-name: Build Frida Python Dump
+name: Build Messiah Memory Scanner
 on: [push, workflow_dispatch]
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
         with:
-          python-version: '3.10'
-      - name: Install Frida
-        run: pip install frida-tools
-      - name: Create Python Script
+          ndk-version: r26d
+      - name: Create Code
         run: |
-          cat > dump.py << 'EOF'
-          import frida
-          import time
+          cat > scanner.cpp << 'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <unistd.h>
+          #include <fcntl.h>
+          #include <dirent.h>
+          #include <sys/mman.h>
 
-          js_code = """
-          setImmediate(function() {
-              console.log("[*] JS loaded. Finding libil2cpp.so...");
-              var il2cpp = Process.findModuleByName("libil2cpp.so");
-              if (!il2cpp) { console.log("[-] libil2cpp.so not found!"); return; }
-              var domain_get = Module.findExportByName("libil2cpp.so", "il2cpp_domain_get");
-              if (domain_get) {
-                  console.log("[+] il2cpp_domain_get found at " + domain_get);
+          // Функция для получения PID по имени пакета
+          int get_pid(const char* package) {
+              char cmd[256];
+              snprintf(cmd, sizeof(cmd), "pidof %s", package);
+              FILE* fp = popen(cmd, "r");
+              if (!fp) return -1;
+              int pid = -1;
+              fscanf(fp, "%d", &pid);
+              pclose(fp);
+              return pid;
+          }
+
+          int main(int argc, char** argv) {
+              const char* pkg = "com.netease.newspike";
+              int pid = get_pid(pkg);
+              if (pid == -1) {
+                  printf("[-] Game not running.\n");
+                  return 1;
               }
-          });
-          """
+              printf("[+] Found game PID: %d\n", pid);
 
-          def on_message(message, data):
-              print("[JS]:", message)
+              char mem_path[64];
+              snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
+              int fd = open(mem_path, O_RDONLY);
+              if (fd < 0) { perror("open mem"); return 1; }
 
-          print("[*] Waiting for device...")
-          device = frida.get_usb_device()
-          print("[*] Attached to device:", device.name)
-          try:
-              print("[*] Spawning com.netease.newspike...")
-              pid = device.spawn(["com.netease.newspike"])
-              session = device.attach(pid)
-              script = session.create_script(js_code)
-              script.on('message', on_message)
-              script.load()
-              device.resume(pid)
-              time.sleep(10)
-          except Exception as e:
-              print("[-] Error:", e)
+              // Читаем карту памяти
+              char maps_path[64];
+              snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+              FILE* maps = fopen(maps_path, "r");
+              if (!maps) { perror("open maps"); return 1; }
+
+              char line[512];
+              long count = 0;
+              // Ищем регионы с правами rw-p (куча, стек)
+              while (fgets(line, sizeof(line), maps)) {
+                  unsigned long start, end;
+                  char perms[5];
+                  if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) == 3) {
+                      if (strcmp(perms, "rw-p") == 0) {
+                          size_t size = end - start;
+                          if (size < 1024 * 1024) continue; // пропускаем мелкие
+                          
+                          // Читаем блок
+                          char* buf = (char*)malloc(size);
+                          if (!buf) continue;
+                          
+                          if (pread(fd, buf, size, start) > 0) {
+                              // Сканируем как float
+                              float* floats = (float*)buf;
+                              for (size_t i = 0; i < size / sizeof(float); i++) {
+                                  float val = floats[i];
+                                  // Фильтр: координаты игроков обычно от -10000 до 10000
+                                  if (val > -10000.0f && val < 10000.0f && val != 0.0f) {
+                                      // Выводим только уникальные (первые 50 для теста)
+                                      if (count < 50) {
+                                          printf("Addr: 0x%lx, Val: %f\n", start + i * sizeof(float), val);
+                                          count++;
+                                      }
+                                  }
+                              }
+                          }
+                          free(buf);
+                      }
+                  }
+              }
+              printf("[+] Scan complete. Found %ld floats.\n", count);
+              fclose(maps);
+              close(fd);
+              return 0;
+          }
           EOF
-      - name: Upload Script
+      - name: Compile
+        run: |
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++ -static-libstdc++ -o scanner scanner.cpp
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dump_script
-          path: dump.py
+          name: scanner
+          path: scanner
