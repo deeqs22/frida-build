@@ -1,0 +1,31 @@
+name: Build Frida Dump
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+      - name: Download Frida Core
+        run: |
+          wget https://github.com/frida/frida/releases/download/16.2.1/frida-core-devkit-16.2.1-android-arm64.tar.xz
+          tar -xf frida-core-devkit-16.2.1-android-arm64.tar.xz
+      - name: Create Code
+        run: |
+          cat > dump.cpp << 'EOF'
+          #include <frida-core.h>
+          #include <stdio.h>
+          #include <unistd.h>
+          int main() { printf("Frida Build OK!\n"); frida_init(); sleep(1); return 0; }
+          EOF
+      - name: Compile
+        run: |
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++ -o frida_dump dump.cpp -I. -L. -lfrida-core -llog -ldl -pthread
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: frida_dump
+          path: frida_dump
