@@ -1,4 +1,4 @@
-name: Build Oxide ImGui Final
+name: Build Oxide ImGui
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -17,7 +17,6 @@ jobs:
         run: |
           mkdir -p src
           
-          # --- ОБХОД АНТИЧИТА ---
           cat > src/anti_bypass.cpp << 'EOF'
           #include <dlfcn.h>
           #include <sys/ptrace.h>
@@ -94,11 +93,9 @@ jobs:
           }
           EOF
           
-          # --- ГЛАВНЫЙ ФАЙЛ (ImGui + Auto-API) ---
           cat > src/main_imgui.cpp << 'EOF'
           #include <EGL/egl.h>
           #include <GLES3/gl3.h>
-          #include <vulkan/vulkan.h>
           #include <android/log.h>
           #include <dlfcn.h>
           #include <pthread.h>
@@ -109,7 +106,6 @@ jobs:
           
           extern void bypass_init();
           static bool g_menu_open = true;
-          static const char* g_current_api = "Unknown";
           
           void init_imgui() {
               ImGui::CreateContext(); ImGui::GetIO().IniFilename = NULL; ImGui_ImplOpenGL3_Init("#version 300 es");
@@ -117,45 +113,30 @@ jobs:
               ImGui::GetStyle().Colors[ImGuiCol_WindowBg] = ImVec4(0.02f, 0.02f, 0.02f, 1.0f);
               ImGui::GetStyle().Colors[ImGuiCol_Border] = ImVec4(1.0f, 0.2f, 0.2f, 1.0f);
           }
+          
           void render_menu() {
               if (!g_menu_open) return;
               ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
               ImGui::SetNextWindowSize(ImVec2(380, 500), ImGuiCond_FirstUseEver);
               ImGui::Begin("OXIDE MENU", &g_menu_open);
               ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "t.me/game_soft_svk");
-              ImGui::Text("Current API: %s", g_current_api);
               ImGui::End(); ImGui::Render(); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
           }
           
           using EglSwapFn = EGLBoolean(*)(EGLDisplay, EGLSurface); static EglSwapFn orig_swap = nullptr;
           EGLBoolean hk_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) { render_menu(); return orig_swap(dpy, surf); }
           
-          using VkQueuePresentFn = VkResult(*)(VkQueue, const VkPresentInfoKHR*); static VkQueuePresentFn orig_vk_present = nullptr;
-          VkResult hk_vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo) { render_menu(); return orig_vk_present(queue, pPresentInfo); }
-          
           void* delayed_init(void* arg) {
               sleep(8);
               bypass::init();
               init_imgui();
-              void* libvulkan = dlopen("libvulkan.so", RTLD_NOW);
-              if (libvulkan) {
-                  void* vk_present = dlsym(libvulkan, "vkQueuePresentKHR");
-                  if (vk_present) {
-                      DobbyHook(vk_present, (void*)hk_vkQueuePresentKHR, (void**)&orig_vk_present);
-                      g_current_api = "Vulkan";
-                      return nullptr;
-                  }
-              }
               void* libegl = dlopen("libEGL.so", RTLD_NOW);
               if (libegl) {
                   void* egl_swap = dlsym(libegl, "eglSwapBuffers");
                   if (egl_swap) {
                       DobbyHook(egl_swap, (void*)hk_eglSwapBuffers, (void**)&orig_swap);
-                      g_current_api = "OpenGL";
-                      return nullptr;
                   }
               }
-              g_current_api = "Failed";
               return nullptr;
           }
           
@@ -180,7 +161,7 @@ jobs:
               imgui/imgui_widgets.cpp
               imgui/backends/imgui_impl_opengl3.cpp
           )
-          target_link_libraries(oxide_imgui log EGL GLESv3 android dl vulkan)
+          target_link_libraries(oxide_imgui log EGL GLESv3 android dl)
           target_compile_options(oxide_imgui PRIVATE -O3 -s -fvisibility=hidden)
           EOF
           
