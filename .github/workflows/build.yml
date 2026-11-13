@@ -28,26 +28,6 @@ jobs:
           
           #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "deeqs_inject", __VA_ARGS__)
           
-          // Точка входа в библиотеку (ищем в maps игры)
-          uintptr_t find_dlopen() {
-              FILE* f = fopen("/proc/self/maps", "r");
-              if (!f) return 0;
-              char line[512];
-              uintptr_t base = 0;
-              while (fgets(line, sizeof(line), f)) {
-                  if (strstr(line, "libdl.so")) {
-                      sscanf(line, "%lx-%*lx", &base);
-                      break;
-                  }
-              }
-              fclose(f);
-              if (!base) return 0;
-              
-              // В реальности нужно парсить ELF libdl.so, чтобы найти смещение dlopen
-              // Для упрощения мы просто вызываем dlopen через системный вызов (или dlsym в текущем процессе)
-              return (uintptr_t)dlsym(RTLD_DEFAULT, "dlopen");
-          }
-          
           int main(int argc, char** argv) {
               if (argc < 3) {
                   LOGI("Usage: %s <pid> <lib_path>", argv[0]);
@@ -57,14 +37,12 @@ jobs:
               const char* lib_path = argv[2];
               LOGI("Injecting %s into PID %d", lib_path, pid);
           
-              // 1. Attach
               if (ptrace(PTRACE_ATTACH, pid, 0, 0) < 0) {
                   perror("ptrace attach");
                   return 1;
               }
               waitpid(pid, NULL, 0);
               
-              // 2. Находим адрес dlopen в нашем процессе (он совпадает с игрой, т.к. libdl общая)
               uintptr_t dlopen_addr = (uintptr_t)dlsym(RTLD_DEFAULT, "dlopen");
               if (!dlopen_addr) {
                   LOGI("Failed to find dlopen");
@@ -72,11 +50,6 @@ jobs:
                   return 1;
               }
           
-              // 3. Записываем путь к библиотеке в память игры (через PTRACE_POKEDATA)
-              // (Код записи строки в память процесса и вызова dlopen)
-              
-              // В реальности это требует сложной работы с регистрами и mmap.
-              // Здесь мы просто выводим лог, что инжектор запущен.
               LOGI("Injector logic ready. Need to write shellcode...");
           
               ptrace(PTRACE_DETACH, pid, 0, 0);
@@ -85,7 +58,7 @@ jobs:
           EOF
       - name: Compile
         run: |
-          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++ -static -o injector injector.cpp -ldl -llog
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++ -o injector injector.cpp -ldl -llog
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
