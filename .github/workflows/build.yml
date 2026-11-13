@@ -9,10 +9,52 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26d
-      - name: Download Zygisk Header
+      - name: Create Zygisk Header
         run: |
           mkdir -p zygisk
-          wget https://raw.githubusercontent.com/Dr-TSNG/ZygiskNext/master/module/src/include/zygisk.hpp -O zygisk/zygisk.hpp
+          cat > zygisk/zygisk.hpp << 'EOF'
+          #pragma once
+          #include <jni.h>
+          #include <string>
+          #include <sys/types.h>
+
+          namespace zygisk {
+              struct AppSpecializeArgs {
+                  jstring *nice_name;
+                  void *args; 
+              };
+
+              struct Api {
+                  void *impl;
+                  void (*setOption)(Api*, int);
+                  int (*getModuleDir)(Api*);
+                  void (*hookJniNativeMethods)(Api*, const char*, const char*, void*, int);
+                  void (*pltHookRegister)(Api*, void*, void*, void**);
+                  void (*pltHookCommit)(Api*);
+                  void (*exemptFd)(Api*, int);
+              };
+
+              class ModuleBase {
+              public:
+                  virtual void onLoad(Api *api, JNIEnv *env) {}
+                  virtual void preAppSpecialize(AppSpecializeArgs *args) {}
+                  virtual void postAppSpecialize(const AppSpecializeArgs *args) {}
+                  virtual void preServerSpecialize(AppSpecializeArgs *args) {}
+                  virtual void postServerSpecialize(const AppSpecializeArgs *args) {}
+                  virtual ~ModuleBase() = default;
+              };
+
+              void registerModule(ModuleBase *module);
+              void unregisterModule();
+          }
+
+          #define REGISTER_ZYGISK_MODULE(clazz) \
+          extern "C" [[gnu::visibility("default")]] void zygisk_module_entry(zygisk::Api *api, JNIEnv *env) { \
+              static clazz module; \
+              module.onLoad(api, env); \
+              zygisk::registerModule(&module); \
+          }
+          EOF
       - name: Create Injector Code
         run: |
           cat > module.cpp << 'EOF'
@@ -33,9 +75,9 @@ jobs:
           public:
               void onLoad(zygisk::Api* api, JNIEnv* env) override { this->api = api; this->env = env; }
               void postAppSpecialize(const zygisk::AppSpecializeArgs* args) override {
-                  const char* pkg = env->GetStringUTFChars(args->nice_name, nullptr);
+                  const char* pkg = env->GetStringUTFChars(*args->nice_name, nullptr);
                   if (pkg && strcmp(pkg, kPkg) == 0) {
-                      env->ReleaseStringUTFChars(args->nice_name, pkg);
+                      env->ReleaseStringUTFChars(*args->nice_name, pkg);
                       pthread_t thread;
                       pthread_create(&thread, nullptr, inject_thread, this);
                       pthread_detach(thread);
@@ -43,7 +85,6 @@ jobs:
               }
           private:
               static void* inject_thread(void* arg) {
-                  auto* self = static_cast<Injector*>(arg);
                   sleep(3); 
                   void* h = dlopen(kSo, RTLD_NOW);
                   if (h) {
