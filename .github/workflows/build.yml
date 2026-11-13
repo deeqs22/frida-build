@@ -137,4 +137,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: zygisk_injector
-          path: libs/arm64-v8a/arm64-v8a.so
+          path: "**/*.so" 
