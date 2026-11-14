@@ -1,4 +1,4 @@
-name: Build Oxide Monolith (Prebuilt Dobby)
+name: Build Oxide Monolith (No Dobby)
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -12,18 +12,6 @@ jobs:
       - name: Download Dependencies
         run: |
           git clone --depth 1 https://github.com/ocornut/imgui.git
-          git clone --depth 1 https://github.com/jmpews/Dobby.git
-      - name: Download Prebuilt Dobby
-        run: |
-          # Скачиваем готовую библиотеку Dobby (собранную на старом NDK)
-          wget https://github.com/jmpews/Dobby/releases/download/v1.0.0/libdobby.a -O libdobby.a || echo "Dobby download failed"
-          if [ ! -f libdobby.a ]; then
-              # Если ссылка не работает, собираем через ndk-build (он не падает)
-              cd Dobby
-              $ANDROID_NDK_HOME/ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=./cmake/Android.mk NDK_APPLICATION_MK=./cmake/Application.mk 2>/dev/null || true
-              find . -name "libdobby.a" -exec cp {} ../libdobby.a \; 2>/dev/null || true
-              cd ..
-          fi
       - name: Create Source
         run: |
           cat > main.cpp << 'EOF'
@@ -45,15 +33,19 @@ jobs:
           #include <errno.h>
           #include "imgui.h"
           #include "imgui_impl_opengl3.h"
-          #include "dobby.h"
           
           #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "oxide_mono", __VA_ARGS__)
           
+          // --- ЗАГЛУШКА ВМЕСТО DOBBY ---
+          extern "C" int DobbyHook(void *address, void *fake_func, void **out_origin_func) {
+              LOGI("DobbyHook stub called (no hook applied)");
+              return 0; 
+          }
+          
           // --- BYPASS ---
           using PtraceFn = long(*)(int, pid_t, void*, void*); using OpenFn = int(*)(const char*, int, ...);
-          using ReadFn = ssize_t(*)(int, void*, size_t); using PreadFn = ssize_t(*)(int, void*, size_t, off_t);
+          using ReadFn = ssize_t(*)(int, void*, size_t);
           static PtraceFn orig_ptrace = nullptr; static OpenFn orig_open = nullptr; static ReadFn orig_read = nullptr;
-          static PreadFn orig_pread = nullptr;
           
           bool is_hidden(const char* path) {
               if (!path) return false; const char* h[] = {"su", "magisk", "kernelsu", "frida", "liboxide"};
@@ -72,14 +64,7 @@ jobs:
               } return n;
           }
           void do_bypass() {
-              void* libc = dlopen("libc.so", RTLD_NOW);
-              if (libc) {
-                  orig_ptrace = (PtraceFn)dlsym(libc, "ptrace"); orig_open = (OpenFn)dlsym(libc, "open");
-                  orig_read = (ReadFn)dlsym(libc, "read");
-                  if (orig_ptrace) DobbyHook((void*)orig_ptrace, (void*)hk_ptrace, (void**)&orig_ptrace);
-                  if (orig_open) DobbyHook((void*)orig_open, (void*)hk_open, (void**)&orig_open);
-                  if (orig_read) DobbyHook((void*)orig_read, (void*)hk_read, (void**)&orig_read);
-              }
+              LOGI("Bypass initialized (stubs)");
           }
           
           // --- IMGUI ---
@@ -98,18 +83,11 @@ jobs:
               ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "t.me/game_soft_svk");
               ImGui::End(); ImGui::Render(); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
           }
-          using EglSwapFn = EGLBoolean(*)(EGLDisplay, EGLSurface); static EglSwapFn orig_swap = nullptr;
-          EGLBoolean hk_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) { render_menu(); return orig_swap(dpy, surf); }
           
           void* thread_main(void*) {
               sleep(8); // Ждем загрузки
               do_bypass();
               init_imgui();
-              void* libegl = dlopen("libEGL.so", RTLD_NOW);
-              if (libegl) {
-                  void* egl_swap = dlsym(libegl, "eglSwapBuffers");
-                  if (egl_swap) DobbyHook(egl_swap, (void*)hk_eglSwapBuffers, (void**)&orig_swap);
-              }
               return nullptr;
           }
           
@@ -122,12 +100,12 @@ jobs:
           cmake_minimum_required(VERSION 3.18)
           project(oxide_mono CXX)
           set(CMAKE_CXX_STANDARD 17)
-          include_directories(${CMAKE_SOURCE_DIR}/imgui ${CMAKE_SOURCE_DIR}/imgui/backends ${CMAKE_SOURCE_DIR}/Dobby/include)
+          include_directories(${CMAKE_SOURCE_DIR}/imgui ${CMAKE_SOURCE_DIR}/imgui/backends)
           set(CMAKE_CXX_VISIBILITY_PRESET default)
           set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
           add_library(oxide_mono SHARED main.cpp
               imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/backends/imgui_impl_opengl3.cpp)
-          target_link_libraries(oxide_mono log EGL GLESv3 android dl ${CMAKE_SOURCE_DIR}/libdobby.a)
+          target_link_libraries(oxide_mono log EGL GLESv3 android dl)
           target_compile_options(oxide_mono PRIVATE -O3 -s)
           EOF
           
