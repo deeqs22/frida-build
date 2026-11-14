@@ -1,4 +1,4 @@
-name: Build Oxide Mono (Custom Hook)
+name: Build Oxide Mono (Custom Hook Fixed)
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -29,19 +29,15 @@ jobs:
           
           #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "oxide_mono", __VA_ARGS__)
           
-          // --- НАШ СВОЙ ХУК (ARM64) ---
-          // Мы не используем Dobby. Мы сами пишем прыжок.
-          struct Hook {
-              void* target;
-              void* detour;
-              uint8_t original[16];
-              uint8_t patch[16];
-              bool installed = false;
-          };
+          // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ДЛЯ ХУКА ---
+          static void* g_target = nullptr;
+          static uint8_t g_original[16];
+          static uint8_t g_patch[16];
+          static bool g_installed = false;
           
-          // Функция для установки хука
           bool install_hook(void* target, void* detour) {
               if (!target || !detour) return false;
+              g_target = target;
               
               // Делаем страницу доступной для записи
               uintptr_t page = (uintptr_t)target & ~0xFFF;
@@ -51,34 +47,30 @@ jobs:
               }
               
               // Сохраняем оригинальные байты (первые 16 байт)
-              memcpy(original, target, 16);
+              memcpy(g_original, target, 16);
               
               // Формируем прыжок: LDR X16, #8; BR X16; <адрес>
-              // 0x58000050 = LDR X16, #8 (загрузить адрес в X16)
-              // 0xD61F0200 = BR X16 (прыгнуть на X16)
-              uint32_t* code = (uint32_t*)patch;
+              uint32_t* code = (uint32_t*)g_patch;
               code[0] = 0x58000050; // LDR X16, #8
               code[1] = 0xD61F0200; // BR X16
               *(uint64_t*)&code[2] = (uint64_t)detour; // Адрес нашей функции
               
               // Записываем патч
-              memcpy(target, patch, 16);
+              memcpy(target, g_patch, 16);
               
-              // Восстанавливаем права на чтение/исполнение
+              // Восстанавливаем права
               mprotect((void*)page, 0x1000, PROT_READ | PROT_EXEC);
-              
-              installed = true;
+              g_installed = true;
               return true;
           }
           
-          // Восстановление
-          void uninstall_hook(void* target) {
-              if (!target || !installed) return;
-              uintptr_t page = (uintptr_t)target & ~0xFFF;
+          void uninstall_hook() {
+              if (!g_target || !g_installed) return;
+              uintptr_t page = (uintptr_t)g_target & ~0xFFF;
               mprotect((void*)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
-              memcpy(target, original, 16);
+              memcpy(g_target, g_original, 16);
               mprotect((void*)page, 0x1000, PROT_READ | PROT_EXEC);
-              installed = false;
+              g_installed = false;
           }
           
           // --- IMGUI ---
@@ -98,11 +90,9 @@ jobs:
               ImGui::End(); ImGui::Render(); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
           }
           
-          // Оригинальная функция
           using EglSwapFn = EGLBoolean(*)(EGLDisplay, EGLSurface);
           static EglSwapFn orig_swap = nullptr;
           
-          // Наша функция-хук
           EGLBoolean hk_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) {
               render_menu();
               return orig_swap(dpy, surf);
