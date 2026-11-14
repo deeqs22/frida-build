@@ -1,4 +1,4 @@
-name: Build Oxide Mono (Final with Dobby)
+name: Build Oxide Mono (No Dobby)
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -9,19 +9,9 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26d
-      - name: Download ImGui & Dobby Header
+      - name: Download ImGui
         run: |
           git clone --depth 1 https://github.com/ocornut/imgui.git
-          git clone --depth 1 https://github.com/jmpews/Dobby.git
-      - name: Download Prebuilt Dobby
-        run: |
-          # Скачиваем готовую библиотеку (чтобы не собирать и не ловить ошибки ассемблера)
-          wget https://github.com/jmpews/Dobby/releases/download/v1.0.0/libdobby.a -O libdobby.a || echo "Prebuilt Dobby not found, trying alternative..."
-          if [ ! -f libdobby.a ]; then
-             # Альтернативная ссылка (если первая мертва)
-             wget https://github.com/Perfare/Zygisk-Il2CppDumper/releases/download/v1.6.1/libdobby.a -O libdobby.a || echo "Alternative failed too"
-          fi
-          if [ -f libdobby.a ]; then echo "Dobby downloaded successfully"; else echo "No Dobby, will use stubs"; fi
       - name: Create Source
         run: |
           cat > main.cpp << 'EOF'
@@ -34,14 +24,10 @@ jobs:
           #include "imgui.h"
           #include "imgui_impl_opengl3.h"
           
-          // Если Dobby не скачалась, используем заглушку
-          #ifdef USE_DOBBY
-          #include "dobby.h"
-          #else
-          extern "C" int DobbyHook(void *address, void *fake_func, void **out_origin_func) { return 0; }
-          #endif
-          
           #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "oxide_mono", __VA_ARGS__)
+          
+          // Заглушка для Dobby
+          extern "C" int DobbyHook(void *address, void *fake_func, void **out_origin_func) { return 0; }
           
           // --- IMGUI ---
           static bool g_menu_open = true;
@@ -57,7 +43,6 @@ jobs:
               ImGui::SetNextWindowSize(ImVec2(380, 500), ImGuiCond_FirstUseEver);
               ImGui::Begin("OXIDE MENU", &g_menu_open);
               ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "t.me/game_soft_svk");
-              ImGui::Text("Status: Premium");
               ImGui::End(); ImGui::Render(); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
           }
           
@@ -73,13 +58,10 @@ jobs:
                   void* egl_swap = dlsym(libegl, "eglSwapBuffers");
                   if (egl_swap) {
                       DobbyHook(egl_swap, (void*)hk_eglSwapBuffers, (void**)&orig_swap);
-                      LOGI("EGL hooked!");
-                  } else {
-                      LOGI("Failed to find eglSwapBuffers");
+                      LOGI("EGL hooked (stub)");
                   }
-              } else {
-                  LOGI("Failed to load libEGL.so");
               }
+              LOGI("Cheat loaded without Dobby. Menu will not render.");
               return nullptr;
           }
           
@@ -92,20 +74,12 @@ jobs:
           cmake_minimum_required(VERSION 3.18)
           project(oxide_mono CXX)
           set(CMAKE_CXX_STANDARD 17)
-          include_directories(${CMAKE_SOURCE_DIR}/imgui ${CMAKE_SOURCE_DIR}/imgui/backends ${CMAKE_SOURCE_DIR}/Dobby/include)
+          include_directories(${CMAKE_SOURCE_DIR}/imgui ${CMAKE_SOURCE_DIR}/imgui/backends)
           set(CMAKE_CXX_VISIBILITY_PRESET default)
           set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
           add_library(oxide_mono SHARED main.cpp
               imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/backends/imgui_impl_opengl3.cpp)
-          
-          # Если libdobby.a есть, линкуем её
-          if(EXISTS "${CMAKE_SOURCE_DIR}/libdobby.a")
-              target_compile_definitions(oxide_mono PRIVATE USE_DOBBY)
-              target_link_libraries(oxide_mono log EGL GLESv3 android dl ${CMAKE_SOURCE_DIR}/libdobby.a)
-          else()
-              target_link_libraries(oxide_mono log EGL GLESv3 android dl)
-          endif()
-          
+          target_link_libraries(oxide_mono log EGL GLESv3 android dl)
           target_compile_options(oxide_mono PRIVATE -O3 -s)
           EOF
           
