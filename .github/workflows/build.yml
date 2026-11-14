@@ -1,4 +1,4 @@
-name: Build Oxide ImGui (Fixed)
+name: Build Oxide ImGui (Fixed Dobby)
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -13,11 +13,18 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/ocornut/imgui.git
           git clone --depth 1 https://github.com/jmpews/Dobby.git
+      - name: Build Dobby
+        run: |
+          cd Dobby
+          mkdir build && cd build
+          cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 -DCMAKE_BUILD_TYPE=Release -DDOBBY_GENERATE_SHARED=OFF -DDOBBY_DEBUG=OFF ..
+          make -j4
+          cd ../..
       - name: Create Source Files
         run: |
           mkdir -p src
           
-          # --- ОБХОД АНТИЧИТА (глобальные функции) ---
+          # --- ОБХОД АНТИЧИТА ---
           cat > src/anti_bypass.cpp << 'EOF'
           #include <dlfcn.h>
           #include <sys/ptrace.h>
@@ -167,7 +174,8 @@ jobs:
               imgui/imgui_widgets.cpp
               imgui/backends/imgui_impl_opengl3.cpp
           )
-          target_link_libraries(oxide_imgui log EGL GLESv3 android dl)
+          # ЖЕСТКАЯ ЛИНКОВКА DOBBY
+          target_link_libraries(oxide_imgui log EGL GLESv3 android dl ${CMAKE_SOURCE_DIR}/Dobby/build/libdobby.a)
           target_compile_options(oxide_imgui PRIVATE -O3 -s)
           EOF
           
