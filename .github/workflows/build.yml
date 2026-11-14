@@ -1,4 +1,4 @@
-name: Build Oxide Mono (No Dobby)
+name: Build Oxide Mono (Custom Hook)
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -21,13 +21,65 @@ jobs:
           #include <dlfcn.h>
           #include <pthread.h>
           #include <unistd.h>
+          #include <sys/mman.h>
+          #include <string.h>
+          #include <stdint.h>
           #include "imgui.h"
           #include "imgui_impl_opengl3.h"
           
           #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "oxide_mono", __VA_ARGS__)
           
-          // Заглушка для Dobby
-          extern "C" int DobbyHook(void *address, void *fake_func, void **out_origin_func) { return 0; }
+          // --- НАШ СВОЙ ХУК (ARM64) ---
+          // Мы не используем Dobby. Мы сами пишем прыжок.
+          struct Hook {
+              void* target;
+              void* detour;
+              uint8_t original[16];
+              uint8_t patch[16];
+              bool installed = false;
+          };
+          
+          // Функция для установки хука
+          bool install_hook(void* target, void* detour) {
+              if (!target || !detour) return false;
+              
+              // Делаем страницу доступной для записи
+              uintptr_t page = (uintptr_t)target & ~0xFFF;
+              if (mprotect((void*)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+                  LOGI("mprotect failed");
+                  return false;
+              }
+              
+              // Сохраняем оригинальные байты (первые 16 байт)
+              memcpy(original, target, 16);
+              
+              // Формируем прыжок: LDR X16, #8; BR X16; <адрес>
+              // 0x58000050 = LDR X16, #8 (загрузить адрес в X16)
+              // 0xD61F0200 = BR X16 (прыгнуть на X16)
+              uint32_t* code = (uint32_t*)patch;
+              code[0] = 0x58000050; // LDR X16, #8
+              code[1] = 0xD61F0200; // BR X16
+              *(uint64_t*)&code[2] = (uint64_t)detour; // Адрес нашей функции
+              
+              // Записываем патч
+              memcpy(target, patch, 16);
+              
+              // Восстанавливаем права на чтение/исполнение
+              mprotect((void*)page, 0x1000, PROT_READ | PROT_EXEC);
+              
+              installed = true;
+              return true;
+          }
+          
+          // Восстановление
+          void uninstall_hook(void* target) {
+              if (!target || !installed) return;
+              uintptr_t page = (uintptr_t)target & ~0xFFF;
+              mprotect((void*)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
+              memcpy(target, original, 16);
+              mprotect((void*)page, 0x1000, PROT_READ | PROT_EXEC);
+              installed = false;
+          }
           
           // --- IMGUI ---
           static bool g_menu_open = true;
@@ -46,8 +98,15 @@ jobs:
               ImGui::End(); ImGui::Render(); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
           }
           
-          using EglSwapFn = EGLBoolean(*)(EGLDisplay, EGLSurface); static EglSwapFn orig_swap = nullptr;
-          EGLBoolean hk_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) { render_menu(); return orig_swap(dpy, surf); }
+          // Оригинальная функция
+          using EglSwapFn = EGLBoolean(*)(EGLDisplay, EGLSurface);
+          static EglSwapFn orig_swap = nullptr;
+          
+          // Наша функция-хук
+          EGLBoolean hk_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) {
+              render_menu();
+              return orig_swap(dpy, surf);
+          }
           
           void* thread_main(void*) {
               sleep(8); // Ждем загрузки
@@ -57,11 +116,18 @@ jobs:
               if (libegl) {
                   void* egl_swap = dlsym(libegl, "eglSwapBuffers");
                   if (egl_swap) {
-                      DobbyHook(egl_swap, (void*)hk_eglSwapBuffers, (void**)&orig_swap);
-                      LOGI("EGL hooked (stub)");
+                      orig_swap = (EglSwapFn)egl_swap;
+                      if (install_hook(egl_swap, (void*)hk_eglSwapBuffers)) {
+                          LOGI("Custom hook installed!");
+                      } else {
+                          LOGI("Hook failed!");
+                      }
+                  } else {
+                      LOGI("Failed to find eglSwapBuffers");
                   }
+              } else {
+                  LOGI("Failed to load libEGL.so");
               }
-              LOGI("Cheat loaded without Dobby. Menu will not render.");
               return nullptr;
           }
           
