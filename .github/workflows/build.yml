@@ -1,4 +1,4 @@
-name: Build Native Injector (No Static)
+name: Build Native Injector (Final Shellcode)
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -27,7 +27,7 @@ jobs:
 
           #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "deeqs_inject", __VA_ARGS__)
 
-          // Шелл-код (ARM64)
+          // Шелл-код (ARM64) для вызова dlopen
           uint8_t shellcode[] = {
               0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // x0 (path)
               0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // x8 (dlopen)
@@ -102,6 +102,13 @@ jobs:
               return base + dlopen_offset;
           }
 
+          // Запись в память через process_vm_writev
+          bool write_memory(pid_t pid, uintptr_t addr, const void* data, size_t len) {
+              struct iovec local = { (void*)data, len };
+              struct iovec remote = { (void*)addr, len };
+              return process_vm_writev(pid, &local, 1, &remote, 1, 0) == (ssize_t)len;
+          }
+
           int main(int argc, char** argv) {
               if (argc < 3) { LOGI("Usage: %s <pid> <lib_path>", argv[0]); return 1; }
               pid_t pid = atoi(argv[1]);
@@ -116,12 +123,45 @@ jobs:
               }
               LOGI("dlopen address: %lx", dlopen_addr);
 
-              char mem_path[64];
-              snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
-              int mem_fd = open(mem_path, O_RDWR);
-              if (mem_fd < 0) { LOGI("Failed to open mem"); return 1; }
+              // 1. Открываем /proc/pid/mem (для чтения карты памяти, чтобы найти свободный регион)
+              char maps_path[64], line[512];
+              snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+              FILE* f = fopen(maps_path, "r");
+              if (!f) { LOGI("Failed to open maps"); return 1; }
+              
+              uintptr_t free_addr = 0;
+              while (fgets(line, sizeof(line), f)) {
+                  if (strstr(line, "rw-p")) {
+                      sscanf(line, "%lx-%*lx", &free_addr);
+                      break;
+                  }
+              }
+              fclose(f);
+              if (!free_addr) { LOGI("Failed to find free region"); return 1; }
+              
+              LOGI("Using free region: %lx", free_addr);
 
-              LOGI("Injector logic ready. Need to write shellcode...");
+              // 2. Записываем путь к библиотеке и шелл-код
+              uintptr_t path_addr = free_addr;
+              uintptr_t code_addr = free_addr + 256;
+              
+              if (!write_memory(pid, path_addr, lib_path, strlen(lib_path) + 1)) {
+                  LOGI("Failed to write path");
+                  return 1;
+              }
+              
+              // Патчим шелл-код адресами
+              uint64_t* patch = (uint64_t*)shellcode;
+              patch[0] = path_addr;   // x0 = path
+              patch[1] = dlopen_addr; // x8 = dlopen
+              
+              if (!write_memory(pid, code_addr, shellcode, sizeof(shellcode))) {
+                  LOGI("Failed to write shellcode");
+                  return 1;
+              }
+              
+              LOGI("Injection successful! Path at %lx, code at %lx", path_addr, code_addr);
+              LOGI("Need to execute code at %lx", code_addr);
               
               return 0;
           }
