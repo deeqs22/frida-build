@@ -1,4 +1,4 @@
-name: Build Oxide Mono (Custom Hook Fixed)
+name: Build Native Injector (Final)
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -9,144 +9,134 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26d
-      - name: Download ImGui
+      - name: Create Injector Source
         run: |
-          git clone --depth 1 https://github.com/ocornut/imgui.git
-      - name: Create Source
-        run: |
-          cat > main.cpp << 'EOF'
-          #include <EGL/egl.h>
-          #include <GLES3/gl3.h>
-          #include <android/log.h>
-          #include <dlfcn.h>
-          #include <pthread.h>
-          #include <unistd.h>
-          #include <sys/mman.h>
+          cat > injector.cpp << 'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
           #include <string.h>
-          #include <stdint.h>
-          #include "imgui.h"
-          #include "imgui_impl_opengl3.h"
-          
-          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "oxide_mono", __VA_ARGS__)
-          
-          // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ДЛЯ ХУКА ---
-          static void* g_target = nullptr;
-          static uint8_t g_original[16];
-          static uint8_t g_patch[16];
-          static bool g_installed = false;
-          
-          bool install_hook(void* target, void* detour) {
-              if (!target || !detour) return false;
-              g_target = target;
-              
-              // Делаем страницу доступной для записи
-              uintptr_t page = (uintptr_t)target & ~0xFFF;
-              if (mprotect((void*)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-                  LOGI("mprotect failed");
-                  return false;
-              }
-              
-              // Сохраняем оригинальные байты (первые 16 байт)
-              memcpy(g_original, target, 16);
-              
-              // Формируем прыжок: LDR X16, #8; BR X16; <адрес>
-              uint32_t* code = (uint32_t*)g_patch;
-              code[0] = 0x58000050; // LDR X16, #8
-              code[1] = 0xD61F0200; // BR X16
-              *(uint64_t*)&code[2] = (uint64_t)detour; // Адрес нашей функции
-              
-              // Записываем патч
-              memcpy(target, g_patch, 16);
-              
-              // Восстанавливаем права
-              mprotect((void*)page, 0x1000, PROT_READ | PROT_EXEC);
-              g_installed = true;
-              return true;
-          }
-          
-          void uninstall_hook() {
-              if (!g_target || !g_installed) return;
-              uintptr_t page = (uintptr_t)g_target & ~0xFFF;
-              mprotect((void*)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
-              memcpy(g_target, g_original, 16);
-              mprotect((void*)page, 0x1000, PROT_READ | PROT_EXEC);
-              g_installed = false;
-          }
-          
-          // --- IMGUI ---
-          static bool g_menu_open = true;
-          void init_imgui() {
-              ImGui::CreateContext(); ImGui::GetIO().IniFilename = NULL; ImGui_ImplOpenGL3_Init("#version 300 es");
-              ImGui::GetStyle().WindowRounding = 15.0f;
-              ImGui::GetStyle().Colors[ImGuiCol_WindowBg] = ImVec4(0.02f, 0.02f, 0.02f, 1.0f);
-              ImGui::GetStyle().Colors[ImGuiCol_Border] = ImVec4(1.0f, 0.2f, 0.2f, 1.0f);
-          }
-          void render_menu() {
-              if (!g_menu_open) return;
-              ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
-              ImGui::SetNextWindowSize(ImVec2(380, 500), ImGuiCond_FirstUseEver);
-              ImGui::Begin("OXIDE MENU", &g_menu_open);
-              ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "t.me/game_soft_svk");
-              ImGui::End(); ImGui::Render(); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-          }
-          
-          using EglSwapFn = EGLBoolean(*)(EGLDisplay, EGLSurface);
-          static EglSwapFn orig_swap = nullptr;
-          
-          EGLBoolean hk_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) {
-              render_menu();
-              return orig_swap(dpy, surf);
-          }
-          
-          void* thread_main(void*) {
-              sleep(8); // Ждем загрузки
-              init_imgui();
-              
-              void* libegl = dlopen("libEGL.so", RTLD_NOW);
-              if (libegl) {
-                  void* egl_swap = dlsym(libegl, "eglSwapBuffers");
-                  if (egl_swap) {
-                      orig_swap = (EglSwapFn)egl_swap;
-                      if (install_hook(egl_swap, (void*)hk_eglSwapBuffers)) {
-                          LOGI("Custom hook installed!");
-                      } else {
-                          LOGI("Hook failed!");
-                      }
-                  } else {
-                      LOGI("Failed to find eglSwapBuffers");
+          #include <unistd.h>
+          #include <sys/uio.h>
+          #include <sys/mman.h>
+          #include <dlfcn.h>
+          #include <fcntl.h>
+          #include <elf.h>
+          #include <sys/ptrace.h>
+          #include <sys/wait.h>
+          #include <android/log.h>
+
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "deeqs_inject", __VA_ARGS__)
+
+          // Шелл-код для ARM64 (вызов dlopen)
+          // x0 = address of lib_path, x1 = RTLD_NOW (2)
+          // x8 = address of dlopen
+          uint8_t shellcode[] = {
+              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // x0 (path)
+              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // x8 (dlopen)
+              0x40, 0x00, 0x80, 0xD2,                         // MOV X1, #2
+              0x00, 0x01, 0x3F, 0xD6,                         // BLR X8
+              0xC0, 0x03, 0x5F, 0xD6                          // RET
+          };
+
+          // Функция для поиска dlopen в памяти игры (через парсинг ELF libdl.so)
+          uintptr_t find_dlopen(pid_t pid) {
+              char maps_path[64], line[512];
+              snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+              FILE* f = fopen(maps_path, "r");
+              if (!f) return 0;
+              uintptr_t base = 0;
+              while (fgets(line, sizeof(line), f)) {
+                  if (strstr(line, "libdl.so")) {
+                      sscanf(line, "%lx-%*lx", &base);
+                      break;
                   }
-              } else {
-                  LOGI("Failed to load libEGL.so");
               }
-              return nullptr;
+              fclose(f);
+              if (!base) return 0;
+              
+              char dl_path[64];
+              snprintf(dl_path, sizeof(dl_path), "/proc/%d/root/system/lib64/libdl.so", pid);
+              int fd = open(dl_path, O_RDONLY);
+              if (fd < 0) return 0;
+              
+              Elf64_Ehdr eh;
+              if (read(fd, &eh, sizeof(eh)) != sizeof(eh)) { close(fd); return 0; }
+              
+              Elf64_Shdr* shdrs = (Elf64_Shdr*)malloc(eh.e_shnum * sizeof(Elf64_Shdr));
+              lseek(fd, eh.e_shoff, SEEK_SET);
+              read(fd, shdrs, eh.e_shnum * sizeof(Elf64_Shdr));
+              
+              const char* strtab = NULL;
+              Elf64_Sym* symtab = NULL;
+              int sym_count = 0;
+              
+              for (int i = 0; i < eh.e_shnum; i++) {
+                  if (shdrs[i].sh_type == SHT_DYNSYM) {
+                      symtab = (Elf64_Sym*)malloc(shdrs[i].sh_size);
+                      lseek(fd, shdrs[i].sh_offset, SEEK_SET);
+                      read(fd, symtab, shdrs[i].sh_size);
+                      sym_count = shdrs[i].sh_size / sizeof(Elf64_Sym);
+                  }
+              }
+              
+              for (int i = 0; i < eh.e_shnum; i++) {
+                  if (shdrs[i].sh_type == SHT_DYNSYM) {
+                      int str_idx = shdrs[i].sh_link;
+                      if (str_idx >= 0 && str_idx < eh.e_shnum) {
+                          strtab = (const char*)malloc(shdrs[str_idx].sh_size);
+                          lseek(fd, shdrs[str_idx].sh_offset, SEEK_SET);
+                          read(fd, (void*)strtab, shdrs[str_idx].sh_size);
+                      }
+                  }
+              }
+              
+              uintptr_t dlopen_offset = 0;
+              if (symtab && strtab) {
+                  for (int i = 0; i < sym_count; i++) {
+                      if (strcmp(strtab + symtab[i].st_name, "dlopen") == 0) {
+                          dlopen_offset = symtab[i].st_value;
+                          break;
+                      }
+                  }
+              }
+              
+              free(symtab); free((void*)strtab); free(shdrs);
+              close(fd);
+              return base + dlopen_offset;
           }
-          
-          extern "C" __attribute__((visibility("default"))) void overlay_entry() {
-              pthread_t t; pthread_create(&t, nullptr, thread_main, nullptr); pthread_detach(t);
+
+          int main(int argc, char** argv) {
+              if (argc < 3) { LOGI("Usage: %s <pid> <lib_path>", argv[0]); return 1; }
+              pid_t pid = atoi(argv[1]);
+              const char* lib_path = argv[2];
+              
+              LOGI("Injecting %s into PID %d", lib_path, pid);
+              
+              uintptr_t dlopen_addr = find_dlopen(pid);
+              if (!dlopen_addr) {
+                  LOGI("Failed to find dlopen");
+                  return 1;
+              }
+              LOGI("dlopen address: %lx", dlopen_addr);
+
+              // 1. Открываем /proc/pid/mem
+              char mem_path[64];
+              snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
+              int mem_fd = open(mem_path, O_RDWR);
+              if (mem_fd < 0) { LOGI("Failed to open mem"); return 1; }
+
+              // 2. Записываем шелл-код и путь (через process_vm_writev)
+              // (Упрощенно: записываем только лог)
+              LOGI("Shellcode ready. Need to write to memory (not implemented)");
+              
+              return 0;
           }
           EOF
-          
-          cat > CMakeLists.txt << 'EOF'
-          cmake_minimum_required(VERSION 3.18)
-          project(oxide_mono CXX)
-          set(CMAKE_CXX_STANDARD 17)
-          include_directories(${CMAKE_SOURCE_DIR}/imgui ${CMAKE_SOURCE_DIR}/imgui/backends)
-          set(CMAKE_CXX_VISIBILITY_PRESET default)
-          set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
-          add_library(oxide_mono SHARED main.cpp
-              imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/backends/imgui_impl_opengl3.cpp)
-          target_link_libraries(oxide_mono log EGL GLESv3 android dl)
-          target_compile_options(oxide_mono PRIVATE -O3 -s)
-          EOF
-          
-      - name: Compile
+      - name: Compile Injector
         run: |
-          mkdir build && cd build
-          cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 -DCMAKE_BUILD_TYPE=Release ..
-          make -j4
-          
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++ -o injector injector.cpp -ldl -llog -static
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: liboxide_mono
-          path: build/liboxide_mono.so
+          name: native_injector
+          path: injector
