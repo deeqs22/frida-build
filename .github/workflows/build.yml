@@ -1,4 +1,4 @@
-name: Build Native Injector (Final)
+name: Build Native Injector (No Static)
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -27,9 +27,7 @@ jobs:
 
           #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "deeqs_inject", __VA_ARGS__)
 
-          // Шелл-код для ARM64 (вызов dlopen)
-          // x0 = address of lib_path, x1 = RTLD_NOW (2)
-          // x8 = address of dlopen
+          // Шелл-код (ARM64)
           uint8_t shellcode[] = {
               0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // x0 (path)
               0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // x8 (dlopen)
@@ -38,7 +36,6 @@ jobs:
               0xC0, 0x03, 0x5F, 0xD6                          // RET
           };
 
-          // Функция для поиска dlopen в памяти игры (через парсинг ELF libdl.so)
           uintptr_t find_dlopen(pid_t pid) {
               char maps_path[64], line[512];
               snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
@@ -119,22 +116,19 @@ jobs:
               }
               LOGI("dlopen address: %lx", dlopen_addr);
 
-              // 1. Открываем /proc/pid/mem
               char mem_path[64];
               snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
               int mem_fd = open(mem_path, O_RDWR);
               if (mem_fd < 0) { LOGI("Failed to open mem"); return 1; }
 
-              // 2. Записываем шелл-код и путь (через process_vm_writev)
-              // (Упрощенно: записываем только лог)
-              LOGI("Shellcode ready. Need to write to memory (not implemented)");
+              LOGI("Injector logic ready. Need to write shellcode...");
               
               return 0;
           }
           EOF
       - name: Compile Injector
         run: |
-          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++ -o injector injector.cpp -ldl -llog -static
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++ -o injector injector.cpp -ldl -llog
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
