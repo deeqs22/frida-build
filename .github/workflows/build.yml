@@ -1,4 +1,4 @@
-name: Build Native Injector
+name: Build Oxide ImGui (Visible Symbols)
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -9,58 +9,178 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26d
-      - name: Create Source
+      - name: Download Dependencies
         run: |
-          cat > injector.cpp << 'EOF'
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <string.h>
-          #include <unistd.h>
-          #include <sys/ptrace.h>
-          #include <sys/wait.h>
-          #include <sys/mman.h>
+          git clone --depth 1 https://github.com/ocornut/imgui.git
+          git clone --depth 1 https://github.com/jmpews/Dobby.git
+      - name: Create Source Files
+        run: |
+          mkdir -p src
+          
+          # --- ОБХОД АНТИЧИТА ---
+          cat > src/anti_bypass.cpp << 'EOF'
           #include <dlfcn.h>
-          #include <sys/uio.h>
-          #include <elf.h>
-          #include <fcntl.h>
-          #include <android/log.h>
+          #include <sys/ptrace.h>
+          #include <sys/stat.h>
           #include <sys/syscall.h>
+          #include <sys/mman.h>
+          #include <unistd.h>
+          #include <fcntl.h>
+          #include <stdarg.h>
+          #include <string.h>
+          #include <string>
+          #include <sstream>
+          #include <errno.h>
+          #include <android/log.h>
+          #include "dobby.h"
           
-          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "deeqs_inject", __VA_ARGS__)
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "oxide_bypass", __VA_ARGS__)
+          namespace bypass {
+              using PtraceFn = long(*)(int, pid_t, void*, void*); using OpenFn = int(*)(const char*, int, ...);
+              using StatFn = int(*)(const char*, struct stat*); using AccessFn = int(*)(const char*, int);
+              using ReadFn = ssize_t(*)(int, void*, size_t); using PreadFn = ssize_t(*)(int, void*, size_t, off_t);
+              using MprotectFn = int(*)(void*, size_t, int); using SyscallFn = long(*)(long, ...);
+              static PtraceFn orig_ptrace = nullptr; static OpenFn orig_open = nullptr; static StatFn orig_stat = nullptr;
+              static AccessFn orig_access = nullptr; static ReadFn orig_read = nullptr; static PreadFn orig_pread = nullptr;
+              static MprotectFn orig_mprotect = nullptr; static SyscallFn orig_syscall = nullptr;
           
-          int main(int argc, char** argv) {
-              if (argc < 3) {
-                  LOGI("Usage: %s <pid> <lib_path>", argv[0]);
-                  return 1;
+              bool is_hidden_path(const char* path) {
+                  if (!path) return false; const char* hidden[] = {"su", "magisk", "kernelsu", "supersu", "busybox", "frida", "xposed", "substrate", "liboxide"};
+                  for (const char* h : hidden) if (strstr(path, h)) return true; return false;
               }
-              pid_t pid = atoi(argv[1]);
-              const char* lib_path = argv[2];
-              LOGI("Injecting %s into PID %d", lib_path, pid);
-          
-              if (ptrace(PTRACE_ATTACH, pid, 0, 0) < 0) {
-                  perror("ptrace attach");
-                  return 1;
+              long hk_ptrace(int req, pid_t pid, void* addr, void* data) { if (req == PTRACE_TRACEME || req == PTRACE_ATTACH) return 0; return orig_ptrace(req, pid, addr, data); }
+              int hk_open(const char* path, int flags, ...) { va_list args; va_start(args, flags); int mode = va_arg(args, int); va_end(args); if (is_hidden_path(path)) { errno = ENOENT; return -1; } return orig_open(path, flags, mode); }
+              int hk_stat(const char* path, struct stat* buf) { if (is_hidden_path(path)) { errno = ENOENT; return -1; } return orig_stat(path, buf); }
+              int hk_access(const char* path, int mode) { if (is_hidden_path(path)) { errno = ENOENT; return -1; } return orig_access(path, mode); }
+              ssize_t hk_read(int fd, void* buf, size_t count) {
+                  ssize_t n = orig_read(fd, buf, count); if (n <= 0) return n;
+                  char link[128] = {}; char p[64]; snprintf(p, sizeof(p), "/proc/self/fd/%d", fd);
+                  ssize_t l = readlink(p, link, sizeof(link)-1); if (l <= 0) return n; link[l] = 0;
+                  if (strstr(link, "/maps") || strstr(link, "/mounts") || strstr(link, "/mountinfo")) {
+                      std::string in((char*)buf, n), out; std::stringstream ss(in); std::string line;
+                      while (std::getline(ss, line)) { if (line.find("ksu") == std::string::npos && line.find("magisk") == std::string::npos && line.find("liboxide") == std::string::npos) out += line + "\n"; }
+                      size_t c = out.size() < count ? out.size() : count; memcpy(buf, out.data(), c); return (ssize_t)c;
+                  } return n;
               }
-              waitpid(pid, NULL, 0);
-              
-              uintptr_t dlopen_addr = (uintptr_t)dlsym(RTLD_DEFAULT, "dlopen");
-              if (!dlopen_addr) {
-                  LOGI("Failed to find dlopen");
-                  ptrace(PTRACE_DETACH, pid, 0, 0);
-                  return 1;
+              ssize_t hk_pread(int fd, void* buf, size_t count, off_t offset) {
+                  char link[128] = {}; char p[64]; snprintf(p, sizeof(p), "/proc/self/fd/%d", fd);
+                  ssize_t l = readlink(p, link, sizeof(link)-1); if (l > 0) { link[l] = 0; if (strstr(link, "/mem")) return 0; }
+                  return orig_pread(fd, buf, count, offset);
               }
-          
-              LOGI("Injector logic ready. Need to write shellcode...");
-          
-              ptrace(PTRACE_DETACH, pid, 0, 0);
-              return 0;
+              int hk_mprotect(void* addr, size_t len, int prot) { if (prot == PROT_READ) return orig_mprotect(addr, len, PROT_READ | PROT_WRITE | PROT_EXEC); return orig_mprotect(addr, len, prot); }
+              long hk_syscall(long number, ...) {
+                  va_list args; va_start(args, number); long a1 = va_arg(args, long); long a2 = va_arg(args, long); long a3 = va_arg(args, long); long a4 = va_arg(args, long); long a5 = va_arg(args, long); long a6 = va_arg(args, long); va_end(args);
+                  if (number == __NR_openat || number == __NR_faccessat) { const char* path = (const char*)a2; if (is_hidden_path(path)) return -ENOENT; }
+                  return orig_syscall(number, a1, a2, a3, a4, a5, a6);
+              }
+              void init() {
+                  void* libc = dlopen("libc.so", RTLD_NOW);
+                  if (libc) {
+                      orig_ptrace = (PtraceFn)dlsym(libc, "ptrace"); orig_open = (OpenFn)dlsym(libc, "open");
+                      orig_stat = (StatFn)dlsym(libc, "stat"); orig_access = (AccessFn)dlsym(libc, "access");
+                      orig_read = (ReadFn)dlsym(libc, "read"); orig_pread = (PreadFn)dlsym(libc, "pread");
+                      orig_mprotect = (MprotectFn)dlsym(libc, "mprotect"); orig_syscall = (SyscallFn)dlsym(libc, "syscall");
+                      if (orig_ptrace) DobbyHook((void*)orig_ptrace, (void*)hk_ptrace, (void**)&orig_ptrace);
+                      if (orig_open) DobbyHook((void*)orig_open, (void*)hk_open, (void**)&orig_open);
+                      if (orig_stat) DobbyHook((void*)orig_stat, (void*)hk_stat, (void**)&orig_stat);
+                      if (orig_access) DobbyHook((void*)orig_access, (void*)hk_access, (void**)&orig_access);
+                      if (orig_read) DobbyHook((void*)orig_read, (void*)hk_read, (void**)&orig_read);
+                      if (orig_pread) DobbyHook((void*)orig_pread, (void*)hk_pread, (void**)&orig_pread);
+                      if (orig_mprotect) DobbyHook((void*)orig_mprotect, (void*)hk_mprotect, (void**)&orig_mprotect);
+                      if (orig_syscall) DobbyHook((void*)orig_syscall, (void*)hk_syscall, (void**)&orig_syscall);
+                  }
+                  LOGI("Ultimate Bypass Initialized");
+              }
           }
           EOF
+          
+          # --- ГЛАВНЫЙ ФАЙЛ (ImGui) ---
+          cat > src/main_imgui.cpp << 'EOF'
+          #include <EGL/egl.h>
+          #include <GLES3/gl3.h>
+          #include <android/log.h>
+          #include <dlfcn.h>
+          #include <pthread.h>
+          #include <unistd.h>
+          #include "imgui.h"
+          #include "imgui_impl_opengl3.h"
+          #include "dobby.h"
+          
+          extern void bypass_init();
+          static bool g_menu_open = true;
+          
+          void init_imgui() {
+              ImGui::CreateContext(); ImGui::GetIO().IniFilename = NULL; ImGui_ImplOpenGL3_Init("#version 300 es");
+              ImGui::GetStyle().WindowRounding = 15.0f;
+              ImGui::GetStyle().Colors[ImGuiCol_WindowBg] = ImVec4(0.02f, 0.02f, 0.02f, 1.0f);
+              ImGui::GetStyle().Colors[ImGuiCol_Border] = ImVec4(1.0f, 0.2f, 0.2f, 1.0f);
+          }
+          
+          void render_menu() {
+              if (!g_menu_open) return;
+              ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
+              ImGui::SetNextWindowSize(ImVec2(380, 500), ImGuiCond_FirstUseEver);
+              ImGui::Begin("OXIDE MENU", &g_menu_open);
+              ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "t.me/game_soft_svk");
+              ImGui::End(); ImGui::Render(); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+          }
+          
+          using EglSwapFn = EGLBoolean(*)(EGLDisplay, EGLSurface); static EglSwapFn orig_swap = nullptr;
+          EGLBoolean hk_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) { render_menu(); return orig_swap(dpy, surf); }
+          
+          void* delayed_init(void* arg) {
+              sleep(8);
+              bypass::init();
+              init_imgui();
+              void* libegl = dlopen("libEGL.so", RTLD_NOW);
+              if (libegl) {
+                  void* egl_swap = dlsym(libegl, "eglSwapBuffers");
+                  if (egl_swap) {
+                      DobbyHook(egl_swap, (void*)hk_eglSwapBuffers, (void**)&orig_swap);
+                  }
+              }
+              return nullptr;
+          }
+          
+          // Принудительный экспорт (видимость)
+          extern "C" __attribute__((visibility("default"))) void overlay_entry() {
+              pthread_t thread;
+              pthread_create(&thread, nullptr, delayed_init, nullptr);
+              pthread_detach(thread);
+          }
+          EOF
+          
+          cat > CMakeLists.txt << 'EOF'
+          cmake_minimum_required(VERSION 3.18)
+          project(oxide_cheat CXX)
+          set(CMAKE_CXX_STANDARD 17)
+          include_directories(${CMAKE_SOURCE_DIR}/imgui ${CMAKE_SOURCE_DIR}/imgui/backends ${CMAKE_SOURCE_DIR}/Dobby/include)
+          
+          # ВАЖНО: Делаем все символы видимыми по умолчанию
+          set(CMAKE_CXX_VISIBILITY_PRESET default)
+          set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
+          
+          add_library(oxide_imgui SHARED
+              src/main_imgui.cpp
+              src/anti_bypass.cpp
+              imgui/imgui.cpp
+              imgui/imgui_draw.cpp
+              imgui/imgui_tables.cpp
+              imgui/imgui_widgets.cpp
+              imgui/backends/imgui_impl_opengl3.cpp
+          )
+          target_link_libraries(oxide_imgui log EGL GLESv3 android dl)
+          target_compile_options(oxide_imgui PRIVATE -O3 -s)
+          EOF
+          
       - name: Compile
         run: |
-          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++ -o injector injector.cpp -ldl -llog
-      - name: Upload
+          mkdir build && cd build
+          cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 -DCMAKE_BUILD_TYPE=Release ..
+          make -j4
+          
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: native_injector
-          path: injector
+          name: liboxide_imgui
+          path: build/liboxide_imgui.so
