@@ -1,4 +1,4 @@
-name: Build Oxide ImGui (Visible Symbols)
+name: Build Oxide ImGui (Fixed)
 on: [push, workflow_dispatch]
 jobs:
   build:
@@ -92,6 +92,10 @@ jobs:
                   LOGI("Ultimate Bypass Initialized");
               }
           }
+          // ИСПРАВЛЕНО: добавлена обертка для вызова из main
+          extern "C" __attribute__((visibility("default"))) void bypass_init() {
+              bypass::init();
+          }
           EOF
           
           # --- ГЛАВНЫЙ ФАЙЛ (ImGui) ---
@@ -106,7 +110,7 @@ jobs:
           #include "imgui_impl_opengl3.h"
           #include "dobby.h"
           
-          extern void bypass_init();
+          extern "C" void bypass_init(); // ИСПРАВЛЕНО
           static bool g_menu_open = true;
           
           void init_imgui() {
@@ -130,7 +134,7 @@ jobs:
           
           void* delayed_init(void* arg) {
               sleep(8);
-              bypass::init();
+              bypass_init(); // ИСПРАВЛЕНО
               init_imgui();
               void* libegl = dlopen("libEGL.so", RTLD_NOW);
               if (libegl) {
@@ -142,7 +146,6 @@ jobs:
               return nullptr;
           }
           
-          // Принудительный экспорт (видимость)
           extern "C" __attribute__((visibility("default"))) void overlay_entry() {
               pthread_t thread;
               pthread_create(&thread, nullptr, delayed_init, nullptr);
